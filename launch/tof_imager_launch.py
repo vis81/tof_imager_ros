@@ -40,8 +40,8 @@ def generate_launch_description():
 
     config_path_arg = DeclareLaunchArgument(
         name='config_path',
-        default_value=sensehat_config_path,
-        description='Sense HAT configuration path')
+        default_value=tof_imager_params_path,
+        description='ToF Imager config path')
 
     ld.add_action(ns_arg)
     ld.add_action(frame_id_arg)

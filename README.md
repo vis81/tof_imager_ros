@@ -43,7 +43,7 @@ More info about the mode and ranging frequency parameters can be found in the Da
   $ sudo python3 setup.py install
   ```
 * Clone this repository in a ROS 2 workspace. Check the ```sensor_params.yaml``` file in the config directory, and make any necessary changes.
-* Build the package and run the launch file: ```ros2 launch vl53l5cx_ros tof_imager_launch.py```
+* Build the package and run the launch file: ```ros2 launch tof_imager_ros tof_imager_launch.py```
 
 ## Results
 

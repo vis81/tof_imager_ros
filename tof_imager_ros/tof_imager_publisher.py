@@ -155,7 +155,7 @@ def main(args=None):
     
     try:
         rclpy.spin(node)
-    except ROSInterruptException::
+    except ROSInterruptException:
         pass
     except ExternalShutdownException:
         sys.exit(1)

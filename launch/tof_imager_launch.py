@@ -62,17 +62,7 @@ def generate_launch_description():
             lifecycle_node_matcher = matches_action(tof_imager_node),
             transition_id = Transition.TRANSITION_CONFIGURE))
 
-    register_activate_handler = RegisterEventHandler(
-        OnStateTransition(
-            target_lifecycle_node=tof_imager_node, goal_state='inactive',
-            entities=[
-                EmitEvent(
-                    event=ChangeState(
-                        lifecycle_node_matcher = matches_action(tof_imager_node),
-                        transition_id = Transition.TRANSITION_ACTIVATE))]))
-
     ld.add_action(tof_imager_node)
     ld.add_action(emit_configure_event)
-    ld.add_action(register_activate_handler)
 
     return ld

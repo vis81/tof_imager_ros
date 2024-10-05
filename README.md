@@ -10,7 +10,7 @@ Note: This implementation is a bit over-engineered, as I have been experimenting
 
 * ```tof_imager_publisher```: This executable uses the [vl53l5cx_python](https://github.com/Abstract-Horizon/vl53l5cx_python/tree/main) library to access sensor data (for both sensors) over I2C. Distance measurements from the sensor are converted to [Pointcloud2](https://docs.ros2.org/foxy/api/sensor_msgs/msg/PointCloud.html) messages which are published periodically using a timer to the ```/pointcloud``` topic. The sensor works in 8x8 and 4x4 modes, with the resolution of 8x8 as default. This implementation is designed as a lifecycle component and can be run individually as well.
 
-* ```tof_imager_launch.py```: This is the launch file that launches ```tof_imager_publisher``` as a  lifecycle node, loads its parameters, and then configures and activates it. The lifecycle node is first initialized, and then set to 'configure' from the launch file. When the 'inactive' state is reached, the registered event handler activates the node.
+* ```tof_imager_launch.py```: This is the launch file that launches ```tof_imager_publisher``` as a  lifecycle node, loads its parameters, and then configures the sensor. The lifecycle node is first initialized, and then set to 'configure' from the launch file. The user then needs to activate the lifecycle node from a separate terminal. 
 
 ## Parameters
 
@@ -47,6 +47,7 @@ More info about the mode and ranging frequency parameters can be found in the Da
   ```
 * Clone this repository in a ROS 2 workspace. Check the ```sensor_params.yaml``` file in the config directory, and make any necessary changes.
 * Build the package and run the launch file: ```ros2 launch tof_imager_ros tof_imager_launch.py```
+* From a separate terminal, activate the sensor: ```ros2 lifecycle set /tof_imager activate```
 
 ## Results
 

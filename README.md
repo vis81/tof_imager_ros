@@ -8,7 +8,7 @@ Note: This implementation is a bit over-engineered, as I have been experimenting
 
 ## Implementation details
 
-* ```tof_imager_publisher```: This executable uses the [vl53l5cx_python](https://github.com/Abstract-Horizon/vl53l5cx_python/tree/main) library to access sensor data (for both sensors) over I2C. Distance measurements from the sensor are converted to [Pointcloud2](https://docs.ros2.org/foxy/api/sensor_msgs/msg/PointCloud.html) messages which are published periodically using a timer to the ```/pointcloud``` topic. The sensor works in 8x8 and 4x4 modes, with the resolution of 8x8 as default. This implementation is designed as a lifecycle component and can be run individually as well.
+* ```tof_imager_publisher```: This executable uses the [vl53l5cx_python](https://github.com/Abstract-Horizon/vl53l5cx_python/tree/main) library to access sensor data (for both sensors) over I2C. Distance measurements from the sensor are converted to [Pointcloud2](https://docs.ros2.org/foxy/api/sensor_msgs/msg/PointCloud.html) messages which are published periodically using a timer to the ```/pointcloud``` topic. Additionally, the point cloud data can also be streamed via OSC (Open Sound Control) when enabled. The sensor works in 8x8 and 4x4 modes, with the resolution of 8x8 as default. This implementation is designed as a lifecycle component and can be run individually as well.
 
 * ```tof_imager_launch.py```: This is the launch file that launches ```tof_imager_publisher``` as a  lifecycle node, loads its parameters, and then configures the sensor. The lifecycle node is first initialized, and then set to 'configure' from the launch file. The user then needs to activate the lifecycle node from a separate terminal. 
 
@@ -19,8 +19,20 @@ Note: This implementation is a bit over-engineered, as I have been experimenting
 * ```mode```: 1 for Continuous mode OR 3 for Autonomous mode (Default: ```1```)
 * ```ranging_freq```: Ranging frequency, limited to 15Hz for 8x8 and 60Hz for 4x4 (Default: ```15```)
 * ```timer_period```: Timer period in seconds (Default: ```0.1```)
+* ```osc_enable```: Enable/disable OSC streaming (Default: ```false```)
+* ```osc_ip```: Target IP address for OSC messages (Default: ```127.0.0.1```)
+* ```osc_port```: Target port for OSC messages (Default: ```8000```)
 
 More info about the mode and ranging frequency parameters can be found in the Datasheets for [VL53L5CX](https://www.st.com/resource/en/datasheet/vl53l5cx.pdf) and [VL53L7CX](https://www.pololu.com/file/0J1992/vl53l7cx.pdf), and Guides for [VL53L5CX](https://www.st.com/resource/en/user_manual/um2884-a-guide-to-using-the-vl53l5cx-multizone-timeofflight-ranging-sensor-with-wide-field-of-view-ultra-lite-driver-uld-stmicroelectronics.pdf) and [VL53L7CX](https://www.pololu.com/file/0J1993/um3038-a-guide-to-using-the-vl53l7cx-timeofflight-multizone-ranging-sensor-with-90-fov-stmicroelectronics.pdf).
+
+## OSC Output
+
+When OSC is enabled, the node streams point cloud coordinates using the following OSC messages:
+* ```/tx```: Array of x coordinates
+* ```/ty```: Array of y coordinates
+* ```/tz```: Array of z coordinates
+
+Each message contains a flattened array of the corresponding coordinate values from the point cloud.
 
 ## How to use
 
@@ -39,11 +51,13 @@ More info about the mode and ranging frequency parameters can be found in the Da
   * Update baud rate by editing the I2C setting in ```/boot/firmware/config.txt``` with the baud rate (1MHz in this case):
     ```
     dtparam=i2c_arm=on,i2c_arm_baudrate=1000000
-* Install the vl53l5cx library (this library works for both sensors):
+    ```
+* Install the required libraries:
   ```
   $ git clone https://github.com/Abstract-Horizon/vl53l5cx_python
   $ cd vl53l5cx_python
   $ sudo python3 setup.py install
+  $ pip3 install python-osc  # For OSC functionality
   ```
 * Clone this repository in a ROS 2 workspace. Check the ```sensor_params.yaml``` file in the config directory, and make any necessary changes.
 * Build the package and run the launch file: ```ros2 launch tof_imager_ros tof_imager_launch.py```

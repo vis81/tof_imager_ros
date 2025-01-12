@@ -23,12 +23,14 @@ from rclpy.qos import qos_profile_sensor_data
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2, PointField
 from vl53l5cx.vl53l5cx import VL53L5CX as ToFImager, VL53L5CXResultsData as ToFImagerResults
+from pythonosc import udp_client
 
 class ToFImagerPublisher(Node):
     def __init__(self, node_name='tof_imager'):
         super().__init__(node_name)
         self.pcl_pub: Optional[Publisher] = None
         self.timer: Optional[Timer] = None   
+        self.osc_client = None
         
         # declare parameters and default values
         self.declare_parameters(
@@ -38,7 +40,10 @@ class ToFImagerPublisher(Node):
                 ('resolution', 8),
                 ('mode', 1), # 1 is continuous, 3 is autonomous
                 ('ranging_freq', 15),
-                ('timer_period', 0.1),  
+                ('timer_period', 0.1),
+                ('osc_enable', False),
+                ('osc_ip', '127.0.0.1'),
+                ('osc_port', 8000),
             ]
         )
 
@@ -49,32 +54,87 @@ class ToFImagerPublisher(Node):
 
         self.get_logger().info('Initialized')
 
+    def setup_osc(self):
+        """Setup OSC communication"""
+        if not self.get_parameter('osc_enable').value:
+            return
+
+        osc_ip = self.get_parameter('osc_ip').value
+        osc_port = self.get_parameter('osc_port').value
+        
+        try:
+            self.osc_client = udp_client.SimpleUDPClient(osc_ip, osc_port)
+            self.get_logger().info(f"OSC communication initialized: {osc_ip}:{osc_port}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to initialize OSC: {e}")
+            self.osc_client = None
+
+    def publish_osc(self, buf):
+        """Publish data using OSC"""
+        if not self.get_parameter('osc_enable').value or self.osc_client is None:
+            return
+
+        # Extract x, y, z coordinates from buffer
+        x_points = buf[:, :, 0].flatten()
+        y_points = buf[:, :, 1].flatten()
+        z_points = buf[:, :, 2].flatten()
+
+        # Send coordinates via OSC
+        try:
+            self.osc_client.send_message("/tx", x_points.tolist())
+            self.osc_client.send_message("/ty", y_points.tolist())
+            self.osc_client.send_message("/tz", z_points.tolist())
+        except Exception as e:
+            self.get_logger().error(f"Error sending OSC messages: {e}")
+
+    def read_sensor(self):
+        """Read data from the ToF sensor and convert to point cloud data"""
+        try:
+            if not self.sensor.check_data_ready():
+                return None
+        except Exception as e:
+            self.get_logger().error(f"Sensor error (code: {e}). Attempting to restart...")
+            try:
+                # Try to recover the sensor
+                self.sensor.stop_ranging()
+                self.sensor.start_ranging()
+            except Exception as restart_error:
+                self.get_logger().error(f"Failed to restart sensor: {restart_error}")
+            return None
+
+        point_dim = 3  # x, y, z
+        point_size = point_dim*4  # bytes
+        
+        try:
+            data = self.sensor.get_ranging_data()
+        except IndexError:
+            data = ToFImagerResults(nb_target_per_zone=1)
+        except Exception as e:
+            self.get_logger().error(f"Error getting ranging data: {e}")
+            return None
+
+        distance_mm = np.array(data.distance_mm[:(self.res*self.res)]).reshape(self.res,self.res)
+        buf = np.empty((self.res, self.res, point_dim), dtype=np.float32)
+        it = np.nditer(distance_mm, flags=["multi_index"])
+        per_px = np.deg2rad(45) / self.res
+        for e in it:
+            w, h = it.multi_index
+            e = 0 if e < 0 else e
+            x = e*np.cos(w*per_px - np.deg2rad(45)/2 - np.deg2rad(90))/1000
+            y = e*np.sin(h*per_px - np.deg2rad(45)/2)/1000
+            z = e/1000
+            buf[w][h] = [x, y, z]
+        
+        return buf, point_size
+
     def publish_pcl(self):
         """Populate and publish the ToF imager pointcloud"""
         if self.pcl_pub is not None and self.pcl_pub.is_activated:
-            if not self.sensor.check_data_ready():
+            sensor_data = self.read_sensor()
+            if sensor_data is None:
                 return
-
-            point_dim = 3 # x, y, z
-            point_size = point_dim*4 # bytes
-            
-            try:
-                data = self.sensor.get_ranging_data()
-            except IndexError:
-                data = ToFImagerResults(nb_target_per_zone=1)
-
-            distance_mm = np.array(data.distance_mm[:(self.res*self.res)]).reshape(self.res,self.res)
-            buf = np.empty((self.res, self.res, point_dim), dtype=np.float32)
-            it = np.nditer(distance_mm, flags=["multi_index"])
-            per_px = np.deg2rad(45) / self.res
-            for e in it:
-                w, h = it.multi_index
-                e = 0 if e < 0 else e
-                x = e*np.cos(w*per_px - np.deg2rad(45)/2 - np.deg2rad(90))/1000
-                y = e*np.sin(h*per_px - np.deg2rad(45)/2)/1000
-                z = e/1000
-                buf[w][h] = [x, y, z]
-
+                
+            buf, point_size = sensor_data
             pc_msg = PointCloud2(
                 header = Header(
                     stamp = self.get_clock().now().to_msg(),
@@ -92,6 +152,7 @@ class ToFImagerPublisher(Node):
                 data = buf.tobytes()
             )  
             self.pcl_pub.publish(pc_msg)
+            self.publish_osc(buf)
 
     def on_configure(self, state: State) -> TransitionCallbackReturn:
         """Configure the ToF imager sensor"""
@@ -115,7 +176,7 @@ class ToFImagerPublisher(Node):
         self.sensor.start_ranging()
         
         if self.sensor.is_alive():
-            self.get_logger().info('Configured')
+            self.get_logger().info('Configured: Inactive')
             return TransitionCallbackReturn.SUCCESS
         else:
             self.get_logger().info('Configuration Failure: Sensor not alive')
@@ -126,7 +187,7 @@ class ToFImagerPublisher(Node):
         try:
             self.pcl_pub = self.create_lifecycle_publisher(PointCloud2, 'pointcloud', qos_profile=qos_profile_sensor_data)
             self.timer = self.create_timer(self.get_parameter('timer_period').value, self.publish_pcl)
-
+            self.setup_osc()
             self.get_logger().info("Activated")
         except Exception as e:
             self.get_logger().error(f"Activation failed: {e}")

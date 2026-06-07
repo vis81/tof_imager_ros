@@ -5,7 +5,7 @@ from typing import Optional
 from rclpy.lifecycle import Node, Publisher, State, TransitionCallbackReturn
 from rclpy.timer import Timer
 from rclpy.executors import ExternalShutdownException
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from rclpy.time import Time
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2, PointField
@@ -109,22 +109,27 @@ class ToFImagerPublisher(Node):
         if result is None:
             return
         buf, res_r, res_c = result
+        # Flatten to a dense unorganized cloud — strips NaN (out-of-range) points.
+        # Organized clouds (height>1) make PCL use OrganizedNeighbor search which
+        # asserts on NaN; unorganized forces KdTree which handles sparse data.
+        pts = buf.reshape(-1, 3)
+        pts = pts[~np.isnan(pts[:, 0])]
         point_size = 3 * 4
         pc_msg = PointCloud2(
             header=Header(
                 stamp=Time().to_msg(),
                 frame_id=self.get_parameter('frame_id').value),
-            height=res_r,
-            width=res_c,
+            height=1,
+            width=len(pts),
             fields=[
                 PointField(name='x', offset=0,  datatype=PointField.FLOAT32, count=1),
                 PointField(name='y', offset=4,  datatype=PointField.FLOAT32, count=1),
                 PointField(name='z', offset=8,  datatype=PointField.FLOAT32, count=1)],
             is_bigendian=False,
-            is_dense=False,
+            is_dense=True,
             point_step=point_size,
-            row_step=point_size * res_c,
-            data=buf.tobytes()
+            row_step=point_size * len(pts),
+            data=pts.tobytes()
         )
         self.pcl_pub.publish(pc_msg)
         self.publish_osc(buf)
@@ -163,7 +168,11 @@ class ToFImagerPublisher(Node):
     def on_activate(self, state: State) -> TransitionCallbackReturn:
         try:
             self.pcl_pub = self.create_lifecycle_publisher(
-                PointCloud2, 'pointcloud', qos_profile=qos_profile_sensor_data)
+                PointCloud2, 'pointcloud',
+                qos_profile=QoSProfile(
+                    reliability=QoSReliabilityPolicy.RELIABLE,
+                    history=QoSHistoryPolicy.KEEP_LAST,
+                    depth=5))
             self.timer = self.create_timer(
                 self.get_parameter('timer_period').value, self.publish_pcl)
             self.setup_osc()

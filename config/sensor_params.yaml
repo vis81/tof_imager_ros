@@ -5,6 +5,7 @@ tof_imager:
         serial_port: /dev/sen0628
         i2c_addr: 51           # 0x33
         timer_period: 0.1      # publish rate (s); UART streams ~every frame
+        min_signal_kcps: 0     # drop zones below this signal strength (kcps/SPAD); 0 = disabled
         osc_enable: false
         osc_ip: "127.0.0.1"
         osc_port: 8000

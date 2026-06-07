@@ -35,7 +35,7 @@ def generate_launch_description():
 
     frame_id_arg = DeclareLaunchArgument(
         name='frame_id',
-        default_value='tof_frame',
+        default_value='sen0628_link',
         description='Frame ID of the ToF Imager')
 
     config_path_arg = DeclareLaunchArgument(

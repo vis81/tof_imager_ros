@@ -1,7 +1,14 @@
 # DFRobot SEN0628 matrix LiDAR drivers
 #
 # UART: device streams ASCII lines continuously:
-#   y<row>:<v0>,<v1>,...,<vN>,\r\n   (values in mm; 4000 = out of range)
+#   y<row>:<v0>,<v1>,...,<vN>,\r\n   (distance mm;  4000 = out of range)
+#   s<row>:<v0>,<v1>,...,<vN>,\r\n   (signal kcps/SPAD; 0 = no target)
+#   s-lines are emitted by custom firmware only; old DFRobot firmware omits them.
+#
+# read_frame() always returns (dist, signal):
+#   dist   — float32 (rows, cols) mm, NaN where out-of-range
+#   signal — float32 (rows, cols) kcps/SPAD, NaN where no target,
+#             or None if the sensor does not emit s-lines
 #
 # I2C: binary command-response protocol (DFRobot vendor library, MIT License)
 
@@ -20,48 +27,66 @@ class Sen0628Uart:
         self.ser.reset_input_buffer()
 
     def read_frame(self, timeout=2.0):
-        """Return float32 ndarray (rows, cols) in mm, NaN where out-of-range. None on timeout."""
+        """Return (dist, signal) for one complete frame.
+
+        dist:   float32 ndarray (rows, cols) in mm, NaN = out-of-range
+        signal: float32 ndarray (rows, cols) in kcps/SPAD, NaN = no target,
+                or None when the sensor doesn't emit s-lines (old firmware)
+        Returns (None, None) on timeout.
+        """
         deadline = time.monotonic() + timeout
-        rows = {}
+        y_rows = {}
+        s_rows = {}
 
         # Sync to y0 line
         while time.monotonic() < deadline:
             line = self._readline()
             if line and line.startswith('y0:'):
-                rows[0] = self._parse_vals(line)
+                y_rows[0] = self._parse_vals(line)
                 break
         else:
-            return None
+            return None, None
 
-        # Accumulate remaining rows until the next y0 (= start of next frame)
+        # Collect remaining y/s rows until next y0 (= start of next frame)
         while time.monotonic() < deadline:
             line = self._readline()
-            if not line:
+            if not line or ':' not in line:
                 continue
-            if ':' not in line or not line.startswith('y'):
+            prefix = line[0]
+            if prefix not in ('y', 's'):
                 continue
             try:
                 row = int(line[1:line.index(':')])
             except ValueError:
                 continue
-            if row == 0:
-                break
-            rows[row] = self._parse_vals(line)
+            if prefix == 'y':
+                if row == 0:
+                    break   # next frame started
+                y_rows[row] = self._parse_vals(line)
+            else:
+                s_rows[row] = self._parse_vals(line)
 
-        if not rows:
-            return None
+        if not y_rows:
+            return None, None
 
-        n_rows = len(rows)
-        n_cols = max(len(v) for v in rows.values()) if rows else 0
-        if n_rows == 0 or n_cols == 0:
-            return None
+        n_rows = len(y_rows)
+        n_cols = max(len(v) for v in y_rows.values())
 
         dist = np.full((n_rows, n_cols), np.nan, dtype=np.float32)
-        for r, vals in rows.items():
+        for r, vals in y_rows.items():
             for c, v in enumerate(vals[:n_cols]):
                 if v < 4000:
                     dist[r, c] = float(v)
-        return dist
+
+        signal = None
+        if s_rows:
+            signal = np.full((n_rows, n_cols), np.nan, dtype=np.float32)
+            for r, vals in s_rows.items():
+                for c, v in enumerate(vals[:n_cols]):
+                    if v > 0:
+                        signal[r, c] = float(v)
+
+        return dist, signal
 
     def close(self):
         if self.ser.is_open:
@@ -120,25 +145,26 @@ class _DFRobotBase:
         return False
 
     def read_frame(self, timeout=2.0):
+        """Return (dist, None) — I2C transport has no signal data."""
         pkt = [0, 1, self.CMD_ALLData]
         self._send(pkt)
         time.sleep(0.1)
         resp = self._recv(self.CMD_ALLData)
         if (len(resp) < 5 or resp[self.INDEX_ERR] != self.ERR_NONE
                 or resp[self.INDEX_STATUS] != self.STATUS_OK):
-            return None
+            return None, None
         length = resp[self.INDEX_LEN_L] | (resp[self.INDEX_LEN_H] << 8)
         raw = resp[self.INDEX_DATA:]
         if len(raw) < length:
-            return None
+            return None, None
         n = length // 2
         side = int(n ** 0.5)
         if side * side != n:
-            return None
+            return None, None
         vals = [raw[i * 2] | (raw[i * 2 + 1] << 8) for i in range(n)]
         dist = np.array(vals, dtype=np.float32).reshape(side, side)
         dist[dist == 0] = np.nan
-        return dist
+        return dist, None
 
     def close(self):
         pass

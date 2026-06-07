@@ -29,14 +29,15 @@ class ToFImagerPublisher(Node):
         self.declare_parameters(
             namespace='',
             parameters=[
-                ('frame_id',    'tof_frame'),
-                ('transport',   'uart'),
-                ('serial_port', '/dev/sen0628'),
-                ('i2c_addr',    51),          # 0x33
-                ('timer_period', 0.1),
-                ('osc_enable',  False),
-                ('osc_ip',      '127.0.0.1'),
-                ('osc_port',    8000),
+                ('frame_id',         'tof_frame'),
+                ('transport',        'uart'),
+                ('serial_port',      '/dev/sen0628'),
+                ('i2c_addr',         51),          # 0x33
+                ('timer_period',     0.1),
+                ('min_signal_kcps',  0),            # 0 = disabled; drop zones below this signal
+                ('osc_enable',       False),
+                ('osc_ip',           '127.0.0.1'),
+                ('osc_port',         8000),
             ]
         )
         self.get_logger().info('Initialized')
@@ -66,15 +67,24 @@ class ToFImagerPublisher(Node):
             self.get_logger().error(f'OSC send error: {e}')
 
     def read_sensor(self):
-        """Read one frame and return (point_buf, res_rows, res_cols) or None."""
+        """Read one frame and return (point_buf, signal_flat_valid, res_rows, res_cols) or None.
+
+        signal_flat_valid is a 1-D float32 array aligned to the valid xyz points,
+        or None when the sensor doesn't provide signal data (old firmware / I2C).
+        """
         try:
-            dist = self.sensor.read_frame()
+            dist, signal = self.sensor.read_frame()
         except Exception as e:
             self.get_logger().error(f'Sensor read error: {e}')
             return None
 
         if dist is None:
             return None
+
+        min_signal = self.get_parameter('min_signal_kcps').value
+        if min_signal > 0 and signal is not None:
+            dist = dist.copy()
+            dist[signal < min_signal] = np.nan
 
         res_r, res_c = dist.shape
         per_px_r = np.deg2rad(45) / res_r
@@ -100,7 +110,12 @@ class ToFImagerPublisher(Node):
         buf[valid, 1] = (d * tan_az)[valid]            # y: left
         buf[valid, 2] = (d * tan_el)[valid]            # z: up
 
-        return buf, res_r, res_c
+        # Extract signal values aligned to valid xyz points
+        sig_valid = None
+        if signal is not None:
+            sig_valid = signal.reshape(-1)[valid.reshape(-1)].astype(np.float32)
+
+        return buf, sig_valid, res_r, res_c
 
     def publish_pcl(self):
         if self.pcl_pub is None or not self.pcl_pub.is_activated:
@@ -108,28 +123,47 @@ class ToFImagerPublisher(Node):
         result = self.read_sensor()
         if result is None:
             return
-        buf, res_r, res_c = result
+        buf, sig_valid, res_r, res_c = result
+
         # Flatten to a dense unorganized cloud — strips NaN (out-of-range) points.
         # Organized clouds (height>1) make PCL use OrganizedNeighbor search which
         # asserts on NaN; unorganized forces KdTree which handles sparse data.
-        pts = buf.reshape(-1, 3)
-        pts = pts[~np.isnan(pts[:, 0])]
-        point_size = 3 * 4
+        pts_all = buf.reshape(-1, 3)
+        valid_mask = ~np.isnan(pts_all[:, 0])
+        pts = pts_all[valid_mask]
+
+        if sig_valid is not None:
+            # xyzi layout (16 bytes/point): x, y, z, intensity
+            point_data = np.column_stack([pts, sig_valid]).astype(np.float32)
+            fields = [
+                PointField(name='x',         offset=0,  datatype=PointField.FLOAT32, count=1),
+                PointField(name='y',         offset=4,  datatype=PointField.FLOAT32, count=1),
+                PointField(name='z',         offset=8,  datatype=PointField.FLOAT32, count=1),
+                PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+            ]
+            point_step = 16
+        else:
+            # xyz only — backward compatible with old firmware / I2C transport
+            point_data = pts
+            fields = [
+                PointField(name='x', offset=0,  datatype=PointField.FLOAT32, count=1),
+                PointField(name='y', offset=4,  datatype=PointField.FLOAT32, count=1),
+                PointField(name='z', offset=8,  datatype=PointField.FLOAT32, count=1),
+            ]
+            point_step = 12
+
         pc_msg = PointCloud2(
             header=Header(
                 stamp=Time().to_msg(),
                 frame_id=self.get_parameter('frame_id').value),
             height=1,
             width=len(pts),
-            fields=[
-                PointField(name='x', offset=0,  datatype=PointField.FLOAT32, count=1),
-                PointField(name='y', offset=4,  datatype=PointField.FLOAT32, count=1),
-                PointField(name='z', offset=8,  datatype=PointField.FLOAT32, count=1)],
+            fields=fields,
             is_bigendian=False,
             is_dense=True,
-            point_step=point_size,
-            row_step=point_size * len(pts),
-            data=pts.tobytes()
+            point_step=point_step,
+            row_step=point_step * len(pts),
+            data=point_data.tobytes()
         )
         self.pcl_pub.publish(pc_msg)
         self.publish_osc(buf)
@@ -152,12 +186,14 @@ class ToFImagerPublisher(Node):
                 self.get_logger().info(f'Using UART transport on {serial_port}')
 
             self.get_logger().info('Waiting for first sensor frame...')
-            dist = self.sensor.read_frame(timeout=5.0)
+            dist, signal = self.sensor.read_frame(timeout=5.0)
             if dist is None:
                 self.get_logger().error('No data from sensor within 5 s')
                 return TransitionCallbackReturn.FAILURE
+            has_signal = signal is not None
             self.get_logger().info(
-                f'Sensor ready: {dist.shape[0]}x{dist.shape[1]} matrix')
+                f'Sensor ready: {dist.shape[0]}x{dist.shape[1]} matrix'
+                f'{", signal data available" if has_signal else ""}')
         except Exception as e:
             self.get_logger().error(f'Failed to open sensor: {e}')
             return TransitionCallbackReturn.FAILURE

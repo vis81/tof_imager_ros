@@ -13,9 +13,9 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
-        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml') + glob('config/*.rviz')),
     ],
-    install_requires=['setuptools', 'numpy', 'vl53l5cx'],
+    install_requires=['setuptools', 'numpy', 'pyserial'],
     zip_safe=True,
     maintainer='Aditya Kamath',
     maintainer_email='adityakamath@live.com',
@@ -25,7 +25,6 @@ setup(
     entry_points={
         'console_scripts': [
             'tof_imager_publisher = tof_imager_ros.tof_imager_publisher:main',
-            'tof_imager_node = tof_imager_ros.tof_imager_node:main',
         ],
     },
 )

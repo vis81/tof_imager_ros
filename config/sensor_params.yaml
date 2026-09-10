@@ -6,6 +6,7 @@ tof_imager:
         i2c_addr: 51           # 0x33
         timer_period: 0.1      # publish rate (s); UART streams ~every frame
         min_signal_kcps: 50    # drop zones below this signal strength (kcps/SPAD); 0 = disabled
+        fov_deg: 60.0          # SEN0628 ranging angle (DFRobot wiki: 60 H, 60 V, 90 diagonal)
         osc_enable: false
         osc_ip: "127.0.0.1"
         osc_port: 8000

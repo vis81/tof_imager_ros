@@ -4,7 +4,16 @@ tof_imager:
         transport: uart        # uart | i2c
         serial_port: /dev/sen0628
         i2c_addr: 51           # 0x33
-        timer_period: 0.1      # publish rate (s); UART streams ~every frame
+        # A poll interval, not a rate. publish_pcl blocks inside the callback
+        # until a whole UART frame has arrived, so the sensor sets the pace and
+        # this only has to be short enough that the timer is always ready.
+        #
+        # It was 0.1, one hair under the device's ~102 ms frame period, which
+        # is the fragile place to sit: a callback that overruns its slot by a
+        # little loses the next tick entirely. That is not what was halving the
+        # rate here — dropping every other frame in read_frame was — but a poll
+        # interval equal to the thing it is polling is worth not keeping.
+        timer_period: 0.02     # poll interval (s); the UART frame sets the rate
         min_signal_kcps: 50    # drop zones below this signal strength (kcps/SPAD); 0 = disabled
         fov_deg: 60.0          # SEN0628 ranging angle (DFRobot wiki: 60 H, 60 V, 90 diagonal)
         osc_enable: false

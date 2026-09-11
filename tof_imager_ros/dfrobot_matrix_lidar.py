@@ -25,6 +25,10 @@ class Sen0628Uart:
         self.ser = serial.Serial(port, baudrate, timeout=1)
         time.sleep(0.1)
         self.ser.reset_input_buffer()
+        # The y0 line that ended the previous frame is the first line of the
+        # next one. Holding it here instead of dropping it is what lets
+        # consecutive calls read consecutive frames — see read_frame.
+        self._pending = None
 
     def read_frame(self, timeout=2.0):
         """Return (dist, signal) for one complete frame.
@@ -38,14 +42,22 @@ class Sen0628Uart:
         y_rows = {}
         s_rows = {}
 
-        # Sync to y0 line
-        while time.monotonic() < deadline:
-            line = self._readline()
-            if line and line.startswith('y0:'):
-                y_rows[0] = self._parse_vals(line)
-                break
+        # Sync to a y0 line, starting from the one the previous call stopped on.
+        # Without that hand-off this consumed a whole frame and then threw away
+        # the y0 that terminated it, so the next call had to wait for the frame
+        # after — halving the output rate. Measured on the robot: the device
+        # streams 9.83 Hz and the topic published exactly 5.00 Hz.
+        if self._pending is not None:
+            y_rows[0] = self._parse_vals(self._pending)
+            self._pending = None
         else:
-            return None, None
+            while time.monotonic() < deadline:
+                line = self._readline()
+                if line and line.startswith('y0:'):
+                    y_rows[0] = self._parse_vals(line)
+                    break
+            else:
+                return None, None
 
         # Collect remaining y/s rows until next y0 (= start of next frame)
         while time.monotonic() < deadline:
@@ -61,7 +73,8 @@ class Sen0628Uart:
                 continue
             if prefix == 'y':
                 if row == 0:
-                    break   # next frame started
+                    self._pending = line     # first line of the next frame
+                    break
                 y_rows[row] = self._parse_vals(line)
             else:
                 s_rows[row] = self._parse_vals(line)

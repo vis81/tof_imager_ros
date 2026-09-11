@@ -33,6 +33,12 @@ class ToFImagerPublisher(Node):
                 ('transport',        'uart'),
                 ('serial_port',      '/dev/sen0628'),
                 ('i2c_addr',         51),          # 0x33
+                # 8 or 4: the 8x8 or 4x4 ranging matrix. 8 is the useful one
+                # here -- the vertical rows are what separates a low obstacle
+                # from the floor, which is the whole reason this sensor is on
+                # the robot. 4x4 is offered because the sensor's ranging budget
+                # is per-zone, so fewer zones can be sampled faster.
+                ('ranging_mode',     8),
                 ('timer_period',     0.1),
                 ('min_signal_kcps',  0),            # 0 = disabled; drop zones below this signal
                 # SEN0628 ranging angle, from the DFRobot wiki: 60 deg
@@ -197,18 +203,29 @@ class ToFImagerPublisher(Node):
         transport   = self.get_parameter('transport').value
         serial_port = self.get_parameter('serial_port').value
         i2c_addr    = self.get_parameter('i2c_addr').value
+        mode        = int(self.get_parameter('ranging_mode').value)
+        if mode not in (4, 8):
+            self.get_logger().error(f'ranging_mode must be 4 or 8, got {mode}')
+            return TransitionCallbackReturn.FAILURE
 
         try:
             if transport == 'i2c':
                 self.sensor = Sen0628I2c(i2c_addr)
                 self.get_logger().info(f'Using I2C transport, addr=0x{i2c_addr:02X}')
                 # I2C requires mode configuration
-                if not self.sensor.set_Ranging_Mode(8):
+                if not self.sensor.set_Ranging_Mode(mode):
                     self.get_logger().error('set_Ranging_Mode() failed')
                     return TransitionCallbackReturn.FAILURE
             else:
                 self.sensor = Sen0628Uart(serial_port)
                 self.get_logger().info(f'Using UART transport on {serial_port}')
+                if mode != 8 and not self.sensor.set_ranging_mode(mode):
+                    self.get_logger().warning(
+                        f'Could not select the {mode}x{mode} matrix: the '
+                        'SEN0628-V1.3 firmware does not act on mode commands '
+                        'over UART, and stalls its input endpoint after the '
+                        'first one. Still streaming, in the mode it is already '
+                        'in. Use transport: i2c to change it.')
 
             self.get_logger().info('Waiting for first sensor frame...')
             dist, signal = self.sensor.read_frame(timeout=5.0)

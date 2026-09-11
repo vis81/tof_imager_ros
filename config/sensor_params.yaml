@@ -4,6 +4,7 @@ tof_imager:
         transport: uart        # uart | i2c
         serial_port: /dev/sen0628
         i2c_addr: 51           # 0x33
+        ranging_mode: 8        # 8x8 or 4x4 matrix; 8 keeps the vertical rows
         # A poll interval, not a rate. publish_pcl blocks inside the callback
         # until a whole UART frame has arrived, so the sensor sets the pace and
         # this only has to be short enough that the timer is always ready.

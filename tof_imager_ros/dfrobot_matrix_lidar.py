@@ -22,13 +22,56 @@ import numpy as np
 
 class Sen0628Uart:
     def __init__(self, port='/dev/sen0628', baudrate=115200):
-        self.ser = serial.Serial(port, baudrate, timeout=1)
+        # write_timeout is not optional here: the V1.3 firmware never drains
+        # its USB-CDC input endpoint, so a write with no timeout blocks
+        # forever and takes bringup down with it. Measured, twice.
+        self.ser = serial.Serial(port, baudrate, timeout=1, write_timeout=2)
         time.sleep(0.1)
         self.ser.reset_input_buffer()
         # The y0 line that ended the previous frame is the first line of the
         # next one. Holding it here instead of dropping it is what lets
         # consecutive calls read consecutive frames — see read_frame.
         self._pending = None
+
+    # Vendor command frame, from DFRobot_MatrixLidar: head 0x55, then the
+    # argument count big/little, then the command, then its arguments. The
+    # library writes it a byte at a time with a 1 ms gap, which is reproduced
+    # here — the device is streaming while it listens, and a burst is not what
+    # its parser was tested against.
+    CMD_SETMODE = 1
+    HEAD = 0x55
+
+    def set_ranging_mode(self, matrix, settle=6.0):
+        """Switch between the 4x4 and 8x8 matrix. matrix is 4 or 8.
+
+        The sensor restarts ranging afterwards, so this drops whatever is in
+        flight and waits before the caller reads again — the vendor library
+        sleeps 5 s at this point for the same reason.
+        """
+        if matrix not in (4, 8):
+            raise ValueError(f'matrix must be 4 or 8, got {matrix}')
+        pkt = bytes([self.HEAD, 0x00, 0x05, self.CMD_SETMODE, 0, 0, 0, matrix])
+        try:
+            for b in pkt:
+                self.ser.write(bytes([b]))
+                time.sleep(0.001)
+        except serial.SerialTimeoutException:
+            # Expected on SEN0628-V1.3. What the device actually does, tested
+            # on a freshly replugged sensor: it accepts one write (8 bytes,
+            # out_waiting back to 0), does not act on it — still 8x8 after —
+            # and from then on its USB-CDC input endpoint stalls, so every
+            # later write times out until it is physically replugged.
+            #
+            # Not fatal. The sensor keeps streaming in whatever mode it is
+            # already in, and a ranging mode we could not select is no reason
+            # to refuse to run. The caller warns; the robot carries on.
+            return False
+        # Deliberately no flush(): it waits for the device to drain and has no
+        # timeout, which is the call that hung the robot when this was written.
+        time.sleep(settle)
+        self.ser.reset_input_buffer()
+        self._pending = None          # stale half-frame from the old shape
+        return True
 
     def read_frame(self, timeout=2.0):
         """Return (dist, signal) for one complete frame.

@@ -136,6 +136,12 @@ class ToFImagerPublisher(Node):
         result = self.read_sensor()
         if result is None:
             return
+        # Stamp as soon as the frame is in hand, before the numpy work below.
+        # read_sensor blocks on a complete UART frame, so this is already the
+        # end of the measurement rather than the start of it — but it is the
+        # closest honest time we have, and it is what the costmap needs to put
+        # the returns where the robot was, not where it has since got to.
+        stamp = self.get_clock().now().to_msg()
         buf, sig_valid, res_r, res_c = result
 
         # Flatten to a dense unorganized cloud — strips NaN (out-of-range) points.
@@ -167,7 +173,13 @@ class ToFImagerPublisher(Node):
 
         pc_msg = PointCloud2(
             header=Header(
-                stamp=Time().to_msg(),
+                # Not Time(): that default-constructs to zero, which tf2 reads
+                # as "use the latest transform available". The cloud then gets
+                # placed at wherever the robot is when the message is handled
+                # instead of where it was when the frame was captured — about
+                # 14 cm of error at 0.7 m/s, in the unsafe direction, since the
+                # obstacle lands beyond its true position.
+                stamp=stamp,
                 frame_id=self.get_parameter('frame_id').value),
             height=1,
             width=len(pts),

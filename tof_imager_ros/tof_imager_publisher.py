@@ -1,3 +1,4 @@
+import os
 import sys
 import rclpy
 import numpy as np
@@ -8,6 +9,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from rclpy.time import Time
 from std_msgs.msg import Header
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from sensor_msgs.msg import PointCloud2, PointField
 from tof_imager_ros.dfrobot_matrix_lidar import Sen0628Uart, Sen0628I2c
 
@@ -25,6 +27,13 @@ class ToFImagerPublisher(Node):
         self.timer: Optional[Timer] = None
         self.osc_client = None
         self.sensor = None
+        # Device loss and recovery are handled here, not by a restart: on a
+        # read error (the cable came out) the port is closed and a slow
+        # timer waits for the device path to come back, reopens it and
+        # resumes. See _lose_sensor / _try_reopen.
+        self.retry_timer: Optional[Timer] = None
+        self.empty_frames = 0
+        self.diag_pub = self.create_publisher(DiagnosticArray, '/diagnostics', 5)
 
         self.declare_parameters(
             namespace='',
@@ -83,14 +92,23 @@ class ToFImagerPublisher(Node):
         signal_flat_valid is a 1-D float32 array aligned to the valid xyz points,
         or None when the sensor doesn't provide signal data (old firmware / I2C).
         """
+        if self.sensor is None:
+            return None
         try:
             dist, signal = self.sensor.read_frame()
         except Exception as e:
-            self.get_logger().error(f'Sensor read error: {e}')
+            self._lose_sensor(f'read error: {e}')
             return None
 
         if dist is None:
+            # Present but silent (a stalled endpoint, a device that will be
+            # gone from /dev a moment later): a few seconds of that and it is
+            # treated like a missing device - close, wait, reopen.
+            self.empty_frames += 1
+            if self.empty_frames >= 3:
+                self._lose_sensor('no frames')
             return None
+        self.empty_frames = 0
 
         min_signal = self.get_parameter('min_signal_kcps').value
         if min_signal > 0 and signal is not None:
@@ -208,40 +226,104 @@ class ToFImagerPublisher(Node):
             self.get_logger().error(f'ranging_mode must be 4 or 8, got {mode}')
             return TransitionCallbackReturn.FAILURE
 
-        try:
-            if transport == 'i2c':
+        if transport == 'i2c':
+            try:
                 self.sensor = Sen0628I2c(i2c_addr)
                 self.get_logger().info(f'Using I2C transport, addr=0x{i2c_addr:02X}')
                 # I2C requires mode configuration
                 if not self.sensor.set_Ranging_Mode(mode):
                     self.get_logger().error('set_Ranging_Mode() failed')
                     return TransitionCallbackReturn.FAILURE
-            else:
-                self.sensor = Sen0628Uart(serial_port)
-                self.get_logger().info(f'Using UART transport on {serial_port}')
-                if mode != 8 and not self.sensor.set_ranging_mode(mode):
-                    self.get_logger().warning(
-                        f'Could not select the {mode}x{mode} matrix: the '
-                        'SEN0628-V1.3 firmware does not act on mode commands '
-                        'over UART, and stalls its input endpoint after the '
-                        'first one. Still streaming, in the mode it is already '
-                        'in. Use transport: i2c to change it.')
+            except Exception as e:
+                self.get_logger().error(f'Failed to open sensor: {e}')
+                return TransitionCallbackReturn.FAILURE
+        elif not self._open_sensor():
+            # Not a failure: the sensor is unplugged (or not ready yet).
+            # Configure succeeds, and the retry timer started on activation
+            # opens it the moment it is there.
+            self.get_logger().warning(
+                f'{serial_port} is not there yet - will open it when it appears')
 
+        self.get_logger().info('Configured: Inactive')
+        return TransitionCallbackReturn.SUCCESS
+
+    def _open_sensor(self) -> bool:
+        """Open the UART sensor and wait for its first frame. False if the
+        device is absent or silent; nothing is left half-open."""
+        serial_port = self.get_parameter('serial_port').value
+        mode = int(self.get_parameter('ranging_mode').value)
+        if not os.path.exists(serial_port):
+            return False
+        try:
+            self.sensor = Sen0628Uart(serial_port)
+            self.get_logger().info(f'Using UART transport on {serial_port}')
+            if mode != 8 and not self.sensor.set_ranging_mode(mode):
+                self.get_logger().warning(
+                    f'Could not select the {mode}x{mode} matrix: the '
+                    'SEN0628-V1.3 firmware does not act on mode commands '
+                    'over UART, and stalls its input endpoint after the '
+                    'first one. Still streaming, in the mode it is already '
+                    'in. Use transport: i2c to change it.')
             self.get_logger().info('Waiting for first sensor frame...')
             dist, signal = self.sensor.read_frame(timeout=5.0)
             if dist is None:
                 self.get_logger().error('No data from sensor within 5 s')
-                return TransitionCallbackReturn.FAILURE
+                self._close_sensor()
+                return False
             has_signal = signal is not None
             self.get_logger().info(
                 f'Sensor ready: {dist.shape[0]}x{dist.shape[1]} matrix'
                 f'{", signal data available" if has_signal else ""}')
         except Exception as e:
             self.get_logger().error(f'Failed to open sensor: {e}')
-            return TransitionCallbackReturn.FAILURE
+            self._close_sensor()
+            return False
+        self.empty_frames = 0
+        self._diag(DiagnosticStatus.OK, f'streaming on {serial_port}')
+        return True
 
-        self.get_logger().info('Configured: Inactive')
-        return TransitionCallbackReturn.SUCCESS
+    def _close_sensor(self):
+        if self.sensor is not None:
+            try:
+                self.sensor.close()
+            except Exception:
+                pass
+            self.sensor = None
+
+    def _lose_sensor(self, why: str):
+        """The device is gone or silent: close it and start waiting for it.
+        The 50 Hz read timer is stopped meanwhile - polling a dead port at
+        that rate was a fifth of a Pi core."""
+        self.get_logger().warning(f'sensor lost ({why}); waiting for it to come back')
+        self._close_sensor()
+        self._diag(DiagnosticStatus.ERROR, f'sensor lost: {why}')
+        if self.timer is not None:
+            self.timer.cancel()
+        if self.retry_timer is None:
+            self.retry_timer = self.create_timer(1.0, self._try_reopen)
+
+    def _try_reopen(self):
+        if self.sensor is not None or not self._open_sensor():
+            if self.sensor is None:
+                self._diag(DiagnosticStatus.ERROR, 'sensor lost: waiting for the device')
+            return
+        self.get_logger().info('sensor is back')
+        if self.retry_timer is not None:
+            self.retry_timer.cancel()
+            self.destroy_timer(self.retry_timer)
+            self.retry_timer = None
+        if self.timer is not None:
+            self.timer.reset()
+
+    def _diag(self, level, message: str):
+        st = DiagnosticStatus(name='sen0628', hardware_id=str(self.get_parameter('serial_port').value),
+                              level=level if isinstance(level, bytes) else bytes([level]),
+                              message=message)
+        st.values = [KeyValue(key='frame_id', value=str(self.get_parameter('frame_id').value))]
+        msg = DiagnosticArray()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.status = [st]
+        self.diag_pub.publish(msg)
 
     def on_activate(self, state: State) -> TransitionCallbackReturn:
         try:
@@ -253,6 +335,8 @@ class ToFImagerPublisher(Node):
                     depth=5))
             self.timer = self.create_timer(
                 self.get_parameter('timer_period').value, self.publish_pcl)
+            if self.sensor is None:
+                self._lose_sensor('not open')
             self.setup_osc()
             self.get_logger().info('Activated')
         except Exception as e:
@@ -260,6 +344,10 @@ class ToFImagerPublisher(Node):
         return super().on_activate(state)
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
+        if self.retry_timer is not None:
+            self.retry_timer.cancel()
+            self.destroy_timer(self.retry_timer)
+            self.retry_timer = None
         if self.timer is not None:
             self.timer.cancel()
             self.destroy_timer(self.timer)
@@ -271,12 +359,7 @@ class ToFImagerPublisher(Node):
         return super().on_deactivate(state)
 
     def on_cleanup(self, state: State) -> TransitionCallbackReturn:
-        if self.sensor is not None:
-            try:
-                self.sensor.close()
-            except Exception:
-                pass
-            self.sensor = None
+        self._close_sensor()
         self.get_logger().info('Cleaned up')
         return TransitionCallbackReturn.SUCCESS
 

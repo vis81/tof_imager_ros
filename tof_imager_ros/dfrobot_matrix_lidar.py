@@ -149,10 +149,10 @@ class Sen0628Uart:
             self.ser.close()
 
     def _readline(self):
-        try:
-            return self.ser.readline().decode('ascii', errors='ignore').strip()
-        except Exception:
-            return ''
+        # A vanished device raises here (SerialException / OSError) and must
+        # reach the caller: swallowing it turned an unplugged cable into an
+        # endless, silent, CPU-burning read loop on a dead descriptor.
+        return self.ser.readline().decode('ascii', errors='ignore').strip()
 
     @staticmethod
     def _parse_vals(line):

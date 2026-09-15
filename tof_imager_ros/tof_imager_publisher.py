@@ -296,15 +296,36 @@ class ToFImagerPublisher(Node):
         that rate was a fifth of a Pi core."""
         self.get_logger().warning(f'sensor lost ({why}); waiting for it to come back')
         self._close_sensor()
+        self._publish_empty()
         self._diag(DiagnosticStatus.ERROR, f'sensor lost: {why}')
         if self.timer is not None:
             self.timer.cancel()
         if self.retry_timer is None:
             self.retry_timer = self.create_timer(1.0, self._try_reopen)
 
+    def _publish_empty(self):
+        """An empty cloud with a fresh stamp. Nav2's obstacle layer keeps a
+        source's last observation until the next one arrives, so a dead
+        sensor's final frame would be re-marked every costmap cycle from an
+        origin the robot left long ago ("Sensor origin ... is out of map
+        bounds" 1300 times in one lap, phantom obstacles, planner failures).
+        An empty observation is the honest state: nothing seen."""
+        if self.pcl_pub is None or not self.pcl_pub.is_activated:
+            return
+        msg = PointCloud2(
+            header=Header(stamp=self.get_clock().now().to_msg(),
+                          frame_id=self.get_parameter('frame_id').value),
+            height=1, width=0, is_dense=True, point_step=12, row_step=0,
+            fields=[PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+                    PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+                    PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1)],
+            data=b'')
+        self.pcl_pub.publish(msg)
+
     def _try_reopen(self):
         if self.sensor is not None or not self._open_sensor():
             if self.sensor is None:
+                self._publish_empty()
                 self._diag(DiagnosticStatus.ERROR, 'sensor lost: waiting for the device')
             return
         self.get_logger().info('sensor is back')
